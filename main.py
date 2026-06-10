@@ -131,7 +131,7 @@ async def analyze_market(data: MarketData):
     drawdown = ((data.account_balance - data.account_equity) / data.account_balance * 100) if data.account_balance > 0 else 0
 
     # M5 trend asosiy yo'nalish
-    main_trend = m5["trend"]
+    main_trend = m1["trend"]
     grid_dir   = grid["direction"]
 
     prompt = f"""Sen XAUUSD scalping trader AI san. Qat'iy qoidalarga amal qil.
@@ -142,7 +142,7 @@ BOZOR:
 - Sessiya: {session['session']} (Faol: {session['active']})
 
 INDIKATORLAR:
-- M5 trend: {m5['trend']} | EMA8={m5['ema8']} EMA21={m5['ema21']} | RSI={m5['rsi']:.1f} | ATR={m5['atr']:.1f}
+- M1 trend (asosiy): {m1["trend"]} | EMA8={m5['ema8']} EMA21={m5['ema21']} | RSI={m5['rsi']:.1f} | ATR={m5['atr']:.1f}
 - M1 trend: {m1['trend']} | EMA8={m1['ema8']} EMA21={m1['ema21']} | RSI={m1['rsi']:.1f}
 
 GRID:
@@ -153,12 +153,12 @@ QATIY QOIDALAR (buzib bo'lmaydi):
 2. Sessiya yopiq → WAIT
 3. Drawdown > 15% → CLOSE_ALL
 4. Grid 5 tadan oshgan → WAIT
-5. M5 trend DOWN bo'lsa → FAQAT SELL yoki WAIT (BUY MUTLAQO YO'Q)
-6. M5 trend UP bo'lsa → FAQAT BUY yoki WAIT (SELL MUTLAQO YO'Q)
-7. M5 trend SIDEWAYS bo'lsa ham RSI signal bo'yicha kir
+5. Trend DOWN bo'lsa → FAQAT SELL yoki WAIT (BUY MUTLAQO YO'Q)
+6. Trend UP bo'lsa → FAQAT BUY yoki WAIT (SELL MUTLAQO YO'Q)
+7. RSI < 35 = BUY signal, RSI > 65 = SELL signal
 8. Grid ochiq BUY bo'lsa → SELL ochma, faqat BUY yoki WAIT
 9. Grid ochiq SELL bo'lsa → BUY ochma, faqat SELL yoki WAIT
-10. M1 va M5 trend bir xil bo'lsagina kir
+10. M1 trend signal bersa kir, M5 faqat ma'lumot uchun
 11. ATR < 0.5 → WAIT (harakat yo'q)
 12. Kuchli trend (EMA farqi katta) + RSI haddan oshgan → WAIT
 
