@@ -86,7 +86,13 @@ def calculate_indicators(candles: List[Candle]) -> dict:
     al = sum(losses)/rsi_period if losses else 0.0001
     rsi = 100 - (100 / (1 + ag/al))
 
-    trend = "UP" if ema8 > ema21 else "DOWN" if ema8 < ema21 else "SIDEWAYS"
+    diff = abs(ema8 - ema21)
+    if diff < 0.3:
+        trend = "SIDEWAYS"
+    elif ema8 > ema21:
+        trend = "UP"
+    else:
+        trend = "DOWN"
 
     return {"ema8": round(ema8,2), "ema21": round(ema21,2),
             "atr": round(atr,2), "rsi": round(rsi,2), "trend": trend}
@@ -157,7 +163,7 @@ QATIY QOIDALAR (buzib bo'lmaydi):
 12. Kuchli trend (EMA farqi katta) + RSI haddan oshgan → WAIT
 
 Faqat JSON, boshqa hech narsa yozma:
-{{"action":"BUY|SELL|WAIT|CLOSE_ALL|CLOSE_PROFIT","lot":0.01,"take_profit":60,"stop_loss":35,"reason":"sabab uzbekcha","risk_level":"LOW|MEDIUM|HIGH","grid_step":40}}"""
+{{"action":"BUY|SELL|WAIT|CLOSE_ALL|CLOSE_PROFIT","lot":0.01,"take_profit":150,"stop_loss":80,"reason":"sabab uzbekcha","risk_level":"LOW|MEDIUM|HIGH","grid_step":40}}"""
 
     try:
         async with httpx.AsyncClient() as client:
@@ -193,8 +199,8 @@ Faqat JSON, boshqa hech narsa yozma:
         return AIDecision(**decision)
 
     except Exception as e:
-        return AIDecision(action="WAIT", lot=0.01, take_profit=60,
-                         stop_loss=35, reason=f"Xato: {str(e)}", risk_level="LOW", grid_step=40)
+        return AIDecision(action="WAIT", lot=0.01, take_profit=150,
+                         stop_loss=80, reason=f"Xato: {str(e)}", risk_level="LOW", grid_step=40)
 
 
 @app.get("/health")
