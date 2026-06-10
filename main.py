@@ -11,7 +11,6 @@ app = FastAPI(title="Gold Scalping AI Server")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 
-# ─── Ma'lumot modellari ───────────────────────────────────────────
 class Candle(BaseModel):
     time: int
     open: float
@@ -55,172 +54,149 @@ class AIDecision(BaseModel):
     grid_step: float
 
 
-# ─── Yordamchi funksiyalar ────────────────────────────────────────
 def calculate_indicators(candles: List[Candle]) -> dict:
     if len(candles) < 21:
-        return {}
+        return {"ema8": 0, "ema21": 0, "atr": 0, "rsi": 50, "trend": "SIDEWAYS"}
 
     closes = [c.close for c in candles]
 
     def ema(data, period):
         k = 2 / (period + 1)
-        ema_val = data[0]
-        for price in data[1:]:
-            ema_val = price * k + ema_val * (1 - k)
-        return ema_val
+        v = data[0]
+        for p in data[1:]:
+            v = p * k + v * (1 - k)
+        return v
 
     ema8  = ema(closes[-8:],  8)
     ema21 = ema(closes[-21:], 21)
 
     atr_period = min(14, len(candles) - 1)
-    true_ranges = []
+    trs = []
     for i in range(1, atr_period + 1):
-        c = candles[-i]
-        p = candles[-i - 1]
-        tr = max(c.high - c.low, abs(c.high - p.close), abs(c.low - p.close))
-        true_ranges.append(tr)
-    atr = sum(true_ranges) / len(true_ranges)
+        c, p = candles[-i], candles[-i-1]
+        trs.append(max(c.high-c.low, abs(c.high-p.close), abs(c.low-p.close)))
+    atr = sum(trs) / len(trs) if trs else 0
 
     rsi_period = min(14, len(closes) - 1)
     gains, losses = [], []
     for i in range(-rsi_period, 0):
-        diff = closes[i] - closes[i - 1]
-        (gains if diff > 0 else losses).append(abs(diff))
-    avg_gain = sum(gains) / rsi_period if gains else 0
-    avg_loss = sum(losses) / rsi_period if losses else 0.0001
-    rsi = 100 - (100 / (1 + avg_gain / avg_loss))
+        d = closes[i] - closes[i-1]
+        (gains if d > 0 else losses).append(abs(d))
+    ag = sum(gains)/rsi_period if gains else 0
+    al = sum(losses)/rsi_period if losses else 0.0001
+    rsi = 100 - (100 / (1 + ag/al))
 
     trend = "UP" if ema8 > ema21 else "DOWN" if ema8 < ema21 else "SIDEWAYS"
 
-    return {
-        "ema8": round(ema8, 2),
-        "ema21": round(ema21, 2),
-        "atr": round(atr, 2),
-        "rsi": round(rsi, 2),
-        "trend": trend,
-    }
+    return {"ema8": round(ema8,2), "ema21": round(ema21,2),
+            "atr": round(atr,2), "rsi": round(rsi,2), "trend": trend}
 
 
-def check_trading_session(server_time: str) -> dict:
+def check_session(server_time: str) -> dict:
     try:
-        dt = datetime.fromisoformat(server_time)
-        hour = dt.hour
+        hour = datetime.fromisoformat(server_time).hour
         if 7 <= hour < 17:
-            session = "LONDON" if hour < 12 else "LONDON_NY"
-            return {"active": True, "session": session}
+            return {"active": True, "session": "LONDON" if hour < 12 else "LONDON_NY"}
         return {"active": False, "session": "CLOSED"}
-    except Exception:
+    except:
         return {"active": True, "session": "UNKNOWN"}
 
 
 def get_grid_status(positions: List[OpenPosition]) -> dict:
     if not positions:
-        return {"count": 0, "avg_price": 0, "total_profit": 0,
-                "direction": None, "worst_price": 0}
-
-    total_profit = sum(p.profit for p in positions)
-    avg_price = sum(p.open_price * p.lot for p in positions) / sum(p.lot for p in positions)
-    direction = positions[0].type if positions else None
-    worst_price = (min(p.open_price for p in positions)
-                   if direction == "BUY"
-                   else max(p.open_price for p in positions))
-
+        return {"count": 0, "avg_price": 0, "total_profit": 0, "direction": "NONE"}
+    total_lot = sum(p.lot for p in positions)
+    avg_price = sum(p.open_price * p.lot for p in positions) / total_lot if total_lot > 0 else 0
     return {
         "count": len(positions),
         "avg_price": round(avg_price, 2),
-        "total_profit": round(total_profit, 2),
-        "direction": direction,
-        "worst_price": round(worst_price, 2),
+        "total_profit": round(sum(p.profit for p in positions), 2),
+        "direction": positions[0].type
     }
 
 
-# ─── Asosiy endpoint ─────────────────────────────────────────────
 @app.post("/analyze", response_model=AIDecision)
 async def analyze_market(data: MarketData):
 
-    ind_m1 = calculate_indicators(data.candles_m1)
-    ind_m5 = calculate_indicators(data.candles_m5)
-    session = check_trading_session(data.server_time)
+    m1 = calculate_indicators(data.candles_m1)
+    m5 = calculate_indicators(data.candles_m5)
+    session = check_session(data.server_time)
     grid = get_grid_status(data.open_positions)
+    drawdown = ((data.account_balance - data.account_equity) / data.account_balance * 100) if data.account_balance > 0 else 0
 
-    drawdown_pct = ((data.account_balance - data.account_equity)
-                    / data.account_balance * 100) if data.account_balance > 0 else 0
+    # M5 trend asosiy yo'nalish
+    main_trend = m5["trend"]
+    grid_dir   = grid["direction"]
 
-    prompt = f"""Siz professional XAUUSD (Gold) scalping trader AI siz.
-Quyidagi bozor ma'lumotlarini tahlil qiling va aniq qaror qabul qiling.
+    prompt = f"""Sen XAUUSD scalping trader AI san. Qat'iy qoidalarga amal qil.
 
-## Joriy Holat
-- Narx: {data.current_price}
-- Spread: {data.spread:.1f} pip
-- Balans: ${data.account_balance:.2f}
-- Kapital: ${data.account_equity:.2f}
-- Erkin margin: ${data.account_free_margin:.2f}
-- Drawdown: {drawdown_pct:.1f}%
+BOZOR:
+- Narx: {data.current_price}, Spread: {data.spread:.0f} pip
+- Balans: ${data.account_balance:.2f}, Drawdown: {drawdown:.1f}%
 - Sessiya: {session['session']} (Faol: {session['active']})
 
-## Texnik Indikatorlar
-### M1:
-- EMA8: {ind_m1.get('ema8', 'N/A')}, EMA21: {ind_m1.get('ema21', 'N/A')}
-- ATR: {ind_m1.get('atr', 'N/A')}, RSI: {ind_m1.get('rsi', 'N/A')}
-- Trend: {ind_m1.get('trend', 'N/A')}
+INDIKATORLAR:
+- M5 trend: {m5['trend']} | EMA8={m5['ema8']} EMA21={m5['ema21']} | RSI={m5['rsi']:.1f} | ATR={m5['atr']:.1f}
+- M1 trend: {m1['trend']} | EMA8={m1['ema8']} EMA21={m1['ema21']} | RSI={m1['rsi']:.1f}
 
-### M5:
-- EMA8: {ind_m5.get('ema8', 'N/A')}, EMA21: {ind_m5.get('ema21', 'N/A')}
-- ATR: {ind_m5.get('atr', 'N/A')}, RSI: {ind_m5.get('rsi', 'N/A')}
-- Trend: {ind_m5.get('trend', 'N/A')}
+GRID:
+- Ochiq: {grid['count']} ta | Yo'nalish: {grid_dir} | O'rtacha: {grid['avg_price']} | P/L: ${grid['total_profit']:.2f}
 
-## Grid Holati
-- Ochiq: {grid['count']} ta, O'rtacha narx: {grid['avg_price']}
-- Jami P/L: ${grid['total_profit']:.2f}, Yo'nalish: {grid['direction']}
-
-## Qoidalar
+QATIY QOIDALAR (buzib bo'lmaydi):
 1. Spread > 40 pip → WAIT
 2. Sessiya yopiq → WAIT
 3. Drawdown > 15% → CLOSE_ALL
-4. Grid 5 tadan oshsa → yangi ochma
-5. TP = 50-80 pip, SL = 30-40 pip
-6. RSI > 75 = SELL signal, RSI < 25 = BUY signal
-7. M5 va M1 trend bir xil bo'lsa → kuchli signal
+4. Grid 5 tadan oshgan → WAIT
+5. M5 trend DOWN bo'lsa → FAQAT SELL yoki WAIT (BUY MUTLAQO YO'Q)
+6. M5 trend UP bo'lsa → FAQAT BUY yoki WAIT (SELL MUTLAQO YO'Q)
+7. M5 trend SIDEWAYS → WAIT (kirmaydi)
+8. Grid ochiq BUY bo'lsa → SELL ochma, faqat BUY yoki WAIT
+9. Grid ochiq SELL bo'lsa → BUY ochma, faqat SELL yoki WAIT
+10. M1 va M5 trend bir xil bo'lsagina kir
+11. ATR < 0.5 → WAIT (harakat yo'q)
+12. Kuchli trend (EMA farqi katta) + RSI haddan oshgan → WAIT
 
-Faqat JSON formatda javob ber, boshqa hech narsa yozma:
-{{"action": "BUY|SELL|WAIT|CLOSE_ALL|CLOSE_PROFIT", "lot": 0.01, "take_profit": 60, "stop_loss": 35, "reason": "sabab uzbek tilida", "risk_level": "LOW|MEDIUM|HIGH", "grid_step": 40}}"""
-
-    # Groq API ga so'rov
-    async with httpx.AsyncClient() as client:
-        response = await client.post(
-            GROQ_URL,
-            headers={
-                "Authorization": f"Bearer {GROQ_API_KEY}",
-                "Content-Type": "application/json"
-            },
-            json={
-                "model": "llama-3.3-70b-versatile",
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 200,
-                "temperature": 0.1
-            },
-            timeout=15.0
-        )
-
-    response_text = response.json()["choices"][0]["message"]["content"].strip()
+Faqat JSON, boshqa hech narsa yozma:
+{{"action":"BUY|SELL|WAIT|CLOSE_ALL|CLOSE_PROFIT","lot":0.01,"take_profit":60,"stop_loss":35,"reason":"sabab uzbekcha","risk_level":"LOW|MEDIUM|HIGH","grid_step":40}}"""
 
     try:
-        clean = response_text.replace("```json", "").replace("```", "").strip()
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                GROQ_URL,
+                headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+                json={"model": "llama-3.3-70b-versatile", "messages": [{"role": "user", "content": prompt}],
+                      "max_tokens": 150, "temperature": 0.1},
+                timeout=15.0
+            )
+        text = resp.json()["choices"][0]["message"]["content"].strip()
+        clean = text.replace("```json","").replace("```","").strip()
         decision = json.loads(clean)
+
+        # Xavfsizlik filtri — server tomonidan ham tekshirish
+        action = decision.get("action", "WAIT")
+        if main_trend == "DOWN" and action == "BUY":
+            decision["action"] = "WAIT"
+            decision["reason"] = "M5 trend DOWN — BUY bloklanди"
+        elif main_trend == "UP" and action == "SELL":
+            decision["action"] = "WAIT"
+            decision["reason"] = "M5 trend UP — SELL bloklanди"
+        elif main_trend == "SIDEWAYS":
+            decision["action"] = "WAIT"
+            decision["reason"] = "Sideways bozor — kutilmoqda"
+        elif grid_dir == "BUY" and action == "SELL":
+            decision["action"] = "WAIT"
+            decision["reason"] = "BUY grid ochiq — SELL bloklanди"
+        elif grid_dir == "SELL" and action == "BUY":
+            decision["action"] = "WAIT"
+            decision["reason"] = "SELL grid ochiq — BUY bloklanди"
+
         return AIDecision(**decision)
+
     except Exception as e:
-        return AIDecision(
-            action="WAIT",
-            lot=0.01,
-            take_profit=60,
-            stop_loss=35,
-            reason=f"Tahlil xatosi: {str(e)}",
-            risk_level="LOW",
-            grid_step=40
-        )
+        return AIDecision(action="WAIT", lot=0.01, take_profit=60,
+                         stop_loss=35, reason=f"Xato: {str(e)}", risk_level="LOW", grid_step=40)
 
 
-# ─── Sog'liq tekshiruvi ───────────────────────────────────────────
 @app.get("/health")
 async def health():
     return {"status": "ok", "server": "Gold Scalping AI", "ai": "Groq LLaMA"}
