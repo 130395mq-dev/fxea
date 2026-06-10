@@ -87,7 +87,7 @@ def calculate_indicators(candles: List[Candle]) -> dict:
     rsi = 100 - (100 / (1 + ag/al))
 
     diff = abs(ema8 - ema21)
-    if diff < 0.3:
+    if diff < 0.1:
         trend = "SIDEWAYS"
     elif ema8 > ema21:
         trend = "UP"
@@ -155,7 +155,7 @@ QATIY QOIDALAR (buzib bo'lmaydi):
 4. Grid 5 tadan oshgan → WAIT
 5. M5 trend DOWN bo'lsa → FAQAT SELL yoki WAIT (BUY MUTLAQO YO'Q)
 6. M5 trend UP bo'lsa → FAQAT BUY yoki WAIT (SELL MUTLAQO YO'Q)
-7. M5 trend SIDEWAYS → WAIT (kirmaydi)
+7. M5 trend SIDEWAYS bo'lsa ham RSI signal bo'yicha kir
 8. Grid ochiq BUY bo'lsa → SELL ochma, faqat BUY yoki WAIT
 9. Grid ochiq SELL bo'lsa → BUY ochma, faqat SELL yoki WAIT
 10. M1 va M5 trend bir xil bo'lsagina kir
@@ -186,7 +186,7 @@ Faqat JSON, boshqa hech narsa yozma:
         elif main_trend == "UP" and action == "SELL":
             decision["action"] = "WAIT"
             decision["reason"] = "M5 trend UP — SELL bloklanди"
-        elif main_trend == "SIDEWAYS":
+        elif main_trend == "SIDEWAYS" and False:
             decision["action"] = "WAIT"
             decision["reason"] = "Sideways bozor — kutilmoqda"
         elif grid_dir == "BUY" and action == "SELL":
