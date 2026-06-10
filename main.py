@@ -1,13 +1,15 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from pydantic import BaseModel
 from typing import List, Optional
-import anthropic
 import json
+import os
+import httpx
 from datetime import datetime
 
 app = FastAPI(title="Gold Scalping AI Server")
 
-client = anthropic.Anthropic()
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 # ─── Ma'lumot modellari ───────────────────────────────────────────
 class Candle(BaseModel):
@@ -20,7 +22,7 @@ class Candle(BaseModel):
 
 class OpenPosition(BaseModel):
     ticket: int
-    type: str        # "BUY" or "SELL"
+    type: str
     lot: float
     open_price: float
     current_price: float
@@ -34,8 +36,8 @@ class MarketData(BaseModel):
     spread: float
     bid: float
     ask: float
-    candles_m1: List[Candle]   # oxirgi 50 ta M1 shamcha
-    candles_m5: List[Candle]   # oxirgi 20 ta M5 shamcha
+    candles_m1: List[Candle]
+    candles_m5: List[Candle]
     open_positions: List[OpenPosition]
     account_balance: float
     account_equity: float
@@ -44,13 +46,13 @@ class MarketData(BaseModel):
     server_time: str
 
 class AIDecision(BaseModel):
-    action: str           # "BUY", "SELL", "CLOSE_ALL", "CLOSE_PROFIT", "WAIT"
+    action: str
     lot: float
-    take_profit: float    # pip
-    stop_loss: float      # pip
+    take_profit: float
+    stop_loss: float
     reason: str
-    risk_level: str       # "LOW", "MEDIUM", "HIGH"
-    grid_step: float      # pip
+    risk_level: str
+    grid_step: float
 
 
 # ─── Yordamchi funksiyalar ────────────────────────────────────────
@@ -60,7 +62,6 @@ def calculate_indicators(candles: List[Candle]) -> dict:
 
     closes = [c.close for c in candles]
 
-    # EMA hisoblash
     def ema(data, period):
         k = 2 / (period + 1)
         ema_val = data[0]
@@ -71,19 +72,15 @@ def calculate_indicators(candles: List[Candle]) -> dict:
     ema8  = ema(closes[-8:],  8)
     ema21 = ema(closes[-21:], 21)
 
-    # ATR hisoblash (14 davr)
     atr_period = min(14, len(candles) - 1)
     true_ranges = []
     for i in range(1, atr_period + 1):
         c = candles[-i]
         p = candles[-i - 1]
-        tr = max(c.high - c.low,
-                 abs(c.high - p.close),
-                 abs(c.low  - p.close))
+        tr = max(c.high - c.low, abs(c.high - p.close), abs(c.low - p.close))
         true_ranges.append(tr)
     atr = sum(true_ranges) / len(true_ranges)
 
-    # RSI hisoblash (14 davr)
     rsi_period = min(14, len(closes) - 1)
     gains, losses = [], []
     for i in range(-rsi_period, 0):
@@ -93,7 +90,6 @@ def calculate_indicators(candles: List[Candle]) -> dict:
     avg_loss = sum(losses) / rsi_period if losses else 0.0001
     rsi = 100 - (100 / (1 + avg_gain / avg_loss))
 
-    # Trend yo'nalishi
     trend = "UP" if ema8 > ema21 else "DOWN" if ema8 < ema21 else "SIDEWAYS"
 
     return {
@@ -106,11 +102,9 @@ def calculate_indicators(candles: List[Candle]) -> dict:
 
 
 def check_trading_session(server_time: str) -> dict:
-    """London + NY sessiyasini tekshirish"""
     try:
         dt = datetime.fromisoformat(server_time)
         hour = dt.hour
-        # London: 07:00-17:00, NY overlap: 12:00-17:00
         if 7 <= hour < 17:
             session = "LONDON" if hour < 12 else "LONDON_NY"
             return {"active": True, "session": session}
@@ -119,26 +113,17 @@ def check_trading_session(server_time: str) -> dict:
         return {"active": True, "session": "UNKNOWN"}
 
 
-def calculate_lot(balance: float, risk_percent: float,
-                  stop_loss_pip: float, pip_value: float = 0.01) -> float:
-    """Risk asosida lot hisoblash"""
-    risk_amount = balance * (risk_percent / 100)
-    lot = risk_amount / (stop_loss_pip * pip_value)
-    lot = round(max(0.01, min(lot, 0.5)), 2)
-    return lot
-
-
 def get_grid_status(positions: List[OpenPosition]) -> dict:
     if not positions:
         return {"count": 0, "avg_price": 0, "total_profit": 0,
                 "direction": None, "worst_price": 0}
 
     total_profit = sum(p.profit for p in positions)
-    avg_price    = sum(p.open_price * p.lot for p in positions) / sum(p.lot for p in positions)
-    direction    = positions[0].type if positions else None
-    worst_price  = (min(p.open_price for p in positions)
-                    if direction == "BUY"
-                    else max(p.open_price for p in positions))
+    avg_price = sum(p.open_price * p.lot for p in positions) / sum(p.lot for p in positions)
+    direction = positions[0].type if positions else None
+    worst_price = (min(p.open_price for p in positions)
+                   if direction == "BUY"
+                   else max(p.open_price for p in positions))
 
     return {
         "count": len(positions),
@@ -153,23 +138,15 @@ def get_grid_status(positions: List[OpenPosition]) -> dict:
 @app.post("/analyze", response_model=AIDecision)
 async def analyze_market(data: MarketData):
 
-    # 1. Indikatorlar
     ind_m1 = calculate_indicators(data.candles_m1)
     ind_m5 = calculate_indicators(data.candles_m5)
-
-    # 2. Sessiya
     session = check_trading_session(data.server_time)
-
-    # 3. Grid holati
     grid = get_grid_status(data.open_positions)
 
-    # 4. Drawdown tekshirish
     drawdown_pct = ((data.account_balance - data.account_equity)
                     / data.account_balance * 100) if data.account_balance > 0 else 0
 
-    # 5. AI prompt
-    prompt = f"""
-Siz professional XAUUSD (Gold) scalping trader AI siz.
+    prompt = f"""Siz professional XAUUSD (Gold) scalping trader AI siz.
 Quyidagi bozor ma'lumotlarini tahlil qiling va aniq qaror qabul qiling.
 
 ## Joriy Holat
@@ -182,71 +159,56 @@ Quyidagi bozor ma'lumotlarini tahlil qiling va aniq qaror qabul qiling.
 - Sessiya: {session['session']} (Faol: {session['active']})
 
 ## Texnik Indikatorlar
-### M1 (tezkor signal):
-- EMA8: {ind_m1.get('ema8', 'N/A')}
-- EMA21: {ind_m1.get('ema21', 'N/A')}
-- ATR: {ind_m1.get('atr', 'N/A')} (volatillik)
-- RSI: {ind_m1.get('rsi', 'N/A')}
+### M1:
+- EMA8: {ind_m1.get('ema8', 'N/A')}, EMA21: {ind_m1.get('ema21', 'N/A')}
+- ATR: {ind_m1.get('atr', 'N/A')}, RSI: {ind_m1.get('rsi', 'N/A')}
 - Trend: {ind_m1.get('trend', 'N/A')}
 
-### M5 (asosiy trend):
-- EMA8: {ind_m5.get('ema8', 'N/A')}
-- EMA21: {ind_m5.get('ema21', 'N/A')}
-- ATR: {ind_m5.get('atr', 'N/A')}
-- RSI: {ind_m5.get('rsi', 'N/A')}
+### M5:
+- EMA8: {ind_m5.get('ema8', 'N/A')}, EMA21: {ind_m5.get('ema21', 'N/A')}
+- ATR: {ind_m5.get('atr', 'N/A')}, RSI: {ind_m5.get('rsi', 'N/A')}
 - Trend: {ind_m5.get('trend', 'N/A')}
 
 ## Grid Holati
-- Ochiq pozitsiyalar: {grid['count']} ta
-- O'rtacha narx: {grid['avg_price']}
-- Jami foyda/zarar: ${grid['total_profit']:.2f}
-- Yo'nalish: {grid['direction']}
-- Eng yomon narx: {grid['worst_price']}
+- Ochiq: {grid['count']} ta, O'rtacha narx: {grid['avg_price']}
+- Jami P/L: ${grid['total_profit']:.2f}, Yo'nalish: {grid['direction']}
 
-## Qaror Qoidalari
-1. Spread > 40 pip bo'lsa → WAIT
-2. Sessiya yopiq bo'lsa → WAIT (yoki foydali pozitsiyalarni yop)
-3. Drawdown > 15% bo'lsa → CLOSE_ALL
+## Qoidalar
+1. Spread > 40 pip → WAIT
+2. Sessiya yopiq → WAIT
+3. Drawdown > 15% → CLOSE_ALL
 4. Grid 5 tadan oshsa → yangi ochma
-5. Scalping: TP = 50-80 pip, SL = 30-40 pip (spread hisobga olingan)
-6. M5 trend bilan M1 signal mos kelsa → KUCHLI signal
-7. RSI: >75 = o'ta sotib olingan, <25 = o'ta sotilgan
-8. Ochiq pozitsiyalar foyda ko'rsatsa va trend o'zgarsa → CLOSE_PROFIT
+5. TP = 50-80 pip, SL = 30-40 pip
+6. RSI > 75 = SELL signal, RSI < 25 = BUY signal
+7. M5 va M1 trend bir xil bo'lsa → kuchli signal
 
-## Muhim
-- XAUUSD cent account: 1 lot = 100 oz, pip = $0.01
-- Kunlik maqsad: $10, maksimal zarar: $4
-- Lot: 0.01 dan 0.10 gacha (xavfsiz)
+Faqat JSON formatda javob ber, boshqa hech narsa yozma:
+{{"action": "BUY|SELL|WAIT|CLOSE_ALL|CLOSE_PROFIT", "lot": 0.01, "take_profit": 60, "stop_loss": 35, "reason": "sabab uzbek tilida", "risk_level": "LOW|MEDIUM|HIGH", "grid_step": 40}}"""
 
-Faqat JSON formatda javob bering, boshqa hech narsa yozmang:
-{{
-  "action": "BUY|SELL|WAIT|CLOSE_ALL|CLOSE_PROFIT",
-  "lot": 0.01,
-  "take_profit": 60,
-  "stop_loss": 35,
-  "reason": "qisqa sabab o'zbek tilida",
-  "risk_level": "LOW|MEDIUM|HIGH",
-  "grid_step": 40
-}}
-"""
+    # Groq API ga so'rov
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            GROQ_URL,
+            headers={
+                "Authorization": f"Bearer {GROQ_API_KEY}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "model": "llama-3.3-70b-versatile",
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 200,
+                "temperature": 0.1
+            },
+            timeout=15.0
+        )
 
-    # 6. Claude API ga so'rov
-    message = client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=500,
-        messages=[{"role": "user", "content": prompt}]
-    )
+    response_text = response.json()["choices"][0]["message"]["content"].strip()
 
-    response_text = message.content[0].text.strip()
-
-    # 7. JSON parse
     try:
-        # ```json ... ``` ni tozalash
         clean = response_text.replace("```json", "").replace("```", "").strip()
         decision = json.loads(clean)
         return AIDecision(**decision)
     except Exception as e:
-        # Xatolik bo'lsa xavfsiz qaror
         return AIDecision(
             action="WAIT",
             lot=0.01,
@@ -261,8 +223,7 @@ Faqat JSON formatda javob bering, boshqa hech narsa yozmang:
 # ─── Sog'liq tekshiruvi ───────────────────────────────────────────
 @app.get("/health")
 async def health():
-    return {"status": "ok", "server": "Gold Scalping AI"}
-
+    return {"status": "ok", "server": "Gold Scalping AI", "ai": "Groq LLaMA"}
 
 @app.get("/")
 async def root():
